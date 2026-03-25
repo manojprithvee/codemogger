@@ -248,14 +248,16 @@ export class Store {
 
   /** Get chunks that need (re-)embedding (scoped to codebase) */
   async getStaleEmbeddings(codebaseId: number, modelName: string, limit?: number): Promise<{ chunkKey: string; name: string; signature: string; filePath: string; kind: string; snippet: string }[]> {
-    const sql = limit 
+    const sql = limit
       ? `SELECT chunk_key, name, signature, file_path, kind, snippet FROM chunks
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)
-         LIMIT ${limit}`
+         LIMIT ?`
       : `SELECT chunk_key, name, signature, file_path, kind, snippet FROM chunks
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`
-    
-    const rows = await this.db.prepare(sql).all(codebaseId, modelName) as any[]
+
+    const rows = limit
+      ? await this.db.prepare(sql).all(codebaseId, modelName, limit) as any[]
+      : await this.db.prepare(sql).all(codebaseId, modelName) as any[]
     return rows.map(r => ({
       chunkKey: r.chunk_key,
       name: r.name,
