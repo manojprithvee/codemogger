@@ -9,6 +9,13 @@ import {
 } from "./schema.ts"
 import type { CodeChunk } from "../chunk/types.ts"
 
+// Private row types for database query results — keeps column renames type-safe.
+type CodebaseRow = { id: number; root_path: string; name: string; indexed_at: number; file_count: number; chunk_count: number }
+type StaleEmbeddingRow = { chunk_key: string; name: string; signature: string; file_path: string; kind: string; snippet: string }
+type VectorSearchRow = { chunk_key: string; file_path: string; name: string; kind: string; signature: string; snippet: string; start_line: number; end_line: number; distance: number }
+type ChunkDataRow = { chunk_key: string; file_path: string; name: string; kind: string; signature: string; start_line: number; end_line: number }
+type IndexedFileRow = { file_path: string; file_hash: string; chunk_count: number; indexed_at: number }
+
 export interface SearchResult {
   chunkKey: string
   filePath: string
@@ -92,7 +99,7 @@ export class Store {
        LEFT JOIN indexed_files f ON f.codebase_id = c.id
        GROUP BY c.id
        ORDER BY c.root_path`
-    ).all() as any[]
+    ).all() as CodebaseRow[]
     return rows.map(r => ({
       id: r.id,
       rootPath: r.root_path,
@@ -256,8 +263,8 @@ export class Store {
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`
 
     const rows = limit
-      ? await this.db.prepare(sql).all(codebaseId, modelName, limit) as any[]
-      : await this.db.prepare(sql).all(codebaseId, modelName) as any[]
+      ? await this.db.prepare(sql).all(codebaseId, modelName, limit) as StaleEmbeddingRow[]
+      : await this.db.prepare(sql).all(codebaseId, modelName) as StaleEmbeddingRow[]
     return rows.map(r => ({
       chunkKey: r.chunk_key,
       name: r.name,
@@ -303,7 +310,7 @@ export class Store {
          ORDER BY distance ASC
          LIMIT ?`
 
-    const rows = await this.db.prepare(sql).all(json, limit) as any[]
+    const rows = await this.db.prepare(sql).all(json, limit) as VectorSearchRow[]
 
     return rows.map((row) => ({
       chunkKey: row.chunk_key,
@@ -349,7 +356,7 @@ export class Store {
             ? `SELECT chunk_key, file_path, name, kind, signature, snippet, start_line, end_line FROM chunks WHERE id = ?`
             : `SELECT chunk_key, file_path, name, kind, signature, start_line, end_line FROM chunks WHERE id = ?`
 
-          const row = await this.db.prepare(dataSql).get(chunk_id) as any
+          const row = await this.db.prepare(dataSql).get(chunk_id) as ChunkDataRow | undefined
           if (!row) continue
 
           allResults.push({
@@ -393,8 +400,8 @@ export class Store {
       : "SELECT file_path, file_hash, chunk_count, indexed_at FROM indexed_files ORDER BY file_path"
 
     const rows = codebaseId != null
-      ? await this.db.prepare(sql).all(codebaseId) as any[]
-      : await this.db.prepare(sql).all() as any[]
+      ? await this.db.prepare(sql).all(codebaseId) as IndexedFileRow[]
+      : await this.db.prepare(sql).all() as IndexedFileRow[]
 
     return rows.map((row) => ({
       filePath: row.file_path,
