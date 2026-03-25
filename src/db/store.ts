@@ -336,38 +336,29 @@ export class Store {
 
   /** FTS search across all codebases (queries each FTS table, merges results) */
   async ftsSearch(query: string, limit: number, includeSnippet: boolean): Promise<SearchResult[]> {
-    // Find all codebase IDs that have FTS tables
-    const codebases = await this.db.prepare("SELECT id FROM codebases").all() as { id: number }[]
+    // Discover existing FTS tables in a single query instead of checking each codebase
+    const ftsTables = await this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*'"
+    ).all() as { name: string }[]
 
     const allResults: SearchResult[] = []
 
-    for (const { id } of codebases) {
-      const table = ftsTableName(id)
-      // Check if FTS table exists
-      const exists = await this.db.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-      ).get(table) as { name: string } | undefined
-      if (!exists) continue
-
+    for (const { name: table } of ftsTables) {
       try {
-        const scores = await this.db.prepare(
-          `SELECT chunk_id, fts_score(name, signature, ?1) AS score
-           FROM ${table}
-           WHERE fts_match(name, signature, ?1)
+        // Join FTS scores with chunk data in a single query (avoids per-row lookups)
+        const snippetCol = includeSnippet ? "c.snippet," : ""
+        const rows = await this.db.prepare(
+          `SELECT c.chunk_key, c.file_path, c.name, c.kind, c.signature,
+                  ${snippetCol} c.start_line, c.end_line,
+                  fts_score(f.name, f.signature, ?1) AS score
+           FROM ${table} f
+           JOIN chunks c ON c.id = f.chunk_id
+           WHERE fts_match(f.name, f.signature, ?1)
            ORDER BY score DESC
            LIMIT ?`
-        ).all(query, limit) as { chunk_id: number; score: number }[]
+        ).all(query, limit) as (ChunkDataRow & { score: number })[]
 
-        if (scores.length === 0) continue
-
-        for (const { chunk_id, score } of scores) {
-          const dataSql = includeSnippet
-            ? `SELECT chunk_key, file_path, name, kind, signature, snippet, start_line, end_line FROM chunks WHERE id = ?`
-            : `SELECT chunk_key, file_path, name, kind, signature, start_line, end_line FROM chunks WHERE id = ?`
-
-          const row = await this.db.prepare(dataSql).get(chunk_id) as ChunkDataRow | undefined
-          if (!row) continue
-
+        for (const row of rows) {
           allResults.push({
             chunkKey: row.chunk_key,
             filePath: row.file_path,
@@ -377,19 +368,19 @@ export class Store {
             snippet: includeSnippet ? row.snippet : "",
             startLine: row.start_line,
             endLine: row.end_line,
-            score,
+            score: row.score,
           })
         }
-      } catch (e: any) {
-        // Only ignore "no such table" / "no such index" errors (FTS not built yet)
-        const msg = String(e?.message ?? e)
+      } catch (e: unknown) {
+        // Ignore stale FTS tables (no such table / no such index); rethrow others
+        const msg = String((e as Error)?.message ?? e)
         if (!msg.includes("no such table") && !msg.includes("no such index")) {
           throw e
         }
       }
     }
 
-    // Sort by score descending, take top limit
+    // Merge across codebases: sort by score descending, take top limit
     allResults.sort((a, b) => b.score - a.score)
     return allResults.slice(0, limit)
   }
