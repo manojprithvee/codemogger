@@ -4,8 +4,7 @@ import {
   ftsTableName,
   createFtsTableSQL,
   createFtsIndexSQL,
-  dropFtsTableSQL,
-  populateFtsSQL,
+  populateFtsForFileSQL,
 } from "./schema.ts"
 import type { CodeChunk } from "../chunk/types.ts"
 
@@ -277,17 +276,27 @@ export class Store {
 
   // ── Per-codebase FTS lifecycle ───────────────────────────────────
 
-  /** Drop and rebuild FTS table for a codebase */
-  async rebuildFtsTable(codebaseId: number): Promise<void> {
-    // Drop old table (and its index)
-    await this.db.exec(dropFtsTableSQL(codebaseId))
-    // Create fresh table
+  /** Drop FTS table for a codebase if it doesn't exist yet (idempotent) */
+  async ensureFtsTable(codebaseId: number): Promise<void> {
     await this.db.exec(createFtsTableSQL(codebaseId))
-    // Populate from chunks
-    await this.db.prepare(populateFtsSQL(codebaseId)).run(codebaseId)
-    // Build FTS index
-    await this.db.exec(createFtsIndexSQL(codebaseId))
-    // Optimize FTS index for faster queries
+    try {
+      await this.db.exec(createFtsIndexSQL(codebaseId))
+    } catch {
+      // Index already exists — ignore
+    }
+  }
+
+  /** Insert FTS entries for all chunks belonging to the given file paths */
+  async populateFtsForFiles(codebaseId: number, filePaths: string[]): Promise<void> {
+    if (filePaths.length === 0) return
+    const stmt = await this.db.prepare(populateFtsForFileSQL(codebaseId))
+    for (const fp of filePaths) {
+      await stmt.run(codebaseId, fp)
+    }
+  }
+
+  /** Optimize the FTS index (call once after a batch of changes) */
+  async optimizeFts(codebaseId: number): Promise<void> {
     await this.db.exec(`OPTIMIZE INDEX idx_${ftsTableName(codebaseId)}`)
   }
 

@@ -81,5 +81,14 @@ SELECT id, name, signature FROM chunks WHERE codebase_id = ?
 `
 }
 
+/** Insert FTS entries for chunks of a single file (used by incremental update) */
+export function populateFtsForFileSQL(codebaseId: number): string {
+  const table = ftsTableName(codebaseId)
+  return `
+INSERT INTO ${table} (chunk_id, name, signature)
+SELECT id, name, signature FROM chunks WHERE codebase_id = ? AND file_path = ?
+`
+}
+
 // Core tables (FTS is per-codebase, created dynamically)
 export const ALL_SCHEMA = [CREATE_CODEBASES_TABLE, CREATE_CHUNKS_TABLE, CREATE_FILES_TABLE]

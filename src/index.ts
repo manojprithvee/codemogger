@@ -95,6 +95,7 @@ export class CodeIndex {
 
     // Get or create codebase entry
     const codebaseId = await store.getOrCreateCodebase(rootDir);
+    await store.ensureFtsTable(codebaseId);
 
     const progressRaw = opts?.onProgress;
     let lastPct = -1;
@@ -205,9 +206,10 @@ export class CodeIndex {
         progress({ phase: "chunk", current: batchStart + bi + 1, total: filesToProcess.length });
       }
 
-      // Write chunks to DB
+      // Write chunks to DB, then incrementally populate FTS entries
       if (batchChunks.length > 0) {
         await store.batchUpsertAllFileChunks(codebaseId, batchChunks);
+        await store.populateFtsForFiles(codebaseId, batchChunks.map(f => f.filePath));
       }
     }
 
@@ -251,10 +253,10 @@ export class CodeIndex {
     progress({ phase: "cleanup", current: 0, total: 0 });
     const removed = await store.removeStaleFiles(codebaseId, activeFiles);
 
-    // Phase 5: Build per-codebase FTS table
+    // Phase 5: Optimize FTS index (entries populated incrementally above)
     progress({ phase: "fts", current: 0, total: 0 });
     const t3 = performance.now();
-    await store.rebuildFtsTable(codebaseId);
+    await store.optimizeFts(codebaseId);
     const ftsTime = Math.round(performance.now() - t3);
 
     // Update codebase timestamp
