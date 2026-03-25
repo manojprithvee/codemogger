@@ -58,8 +58,12 @@ export async function scanDirectory(
   try {
     const gitignore = await readFile(join(rootDir, ".gitignore"), "utf-8");
     ignorePatterns = loadIgnorePatterns(gitignore);
-  } catch {
-    // no .gitignore
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      errors.push(`cannot read .gitignore: ${err}`);
+    }
+    // ENOENT = no .gitignore, which is fine
   }
 
   const langFilter = languages ? new Set(languages) : null;
