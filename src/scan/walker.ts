@@ -83,12 +83,12 @@ export async function scanDirectory(
 
       const fullPath = join(dir, name);
 
-      if (entry.isDirectory()) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
         await walk(fullPath);
         continue;
       }
 
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) continue;
 
       // Check if this is a supported language
       const langConfig = detectLanguage(name);
