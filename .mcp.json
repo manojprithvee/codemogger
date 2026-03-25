@@ -2,8 +2,8 @@
   "mcpServers": {
     "codemogger": {
       "type": "stdio",
-      "command": "bun",
-      "args": ["run", "/Users/glaubercosta/recall/bin/codemogger.ts", "mcp"]
+      "command": "codemogger",
+      "args": ["mcp"]
     }
   }
 }
