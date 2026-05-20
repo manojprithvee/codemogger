@@ -53,7 +53,7 @@ export class Store {
 
   static async open(dbPath: string): Promise<Store> {
     const db = await connect(dbPath, {
-      experimental: ["index_method"],
+      experimental: ["index_method", "multiprocess_wal"],
     })
     const store = new Store(db)
     await store.init()
@@ -72,33 +72,25 @@ export class Store {
 
   /** Get or create a codebase entry, returns its id */
   async getOrCreateCodebase(rootPath: string, name?: string): Promise<number> {
-    const row = await this.db.prepare(
-      "SELECT id FROM codebases WHERE root_path = ?"
-    ).get(rootPath) as { id: number } | undefined
+    const row = await (await this.db.prepare("SELECT id FROM codebases WHERE root_path = ?")).get(rootPath) as { id: number } | undefined
 
     if (row) return row.id
 
-    await this.db.prepare(
-      "INSERT INTO codebases (root_path, name, indexed_at) VALUES (?, ?, ?)"
-    ).run(rootPath, name ?? rootPath.split("/").pop() ?? "", Date.now())
+    await (await this.db.prepare("INSERT INTO codebases (root_path, name, indexed_at) VALUES (?, ?, ?)")).run(rootPath, name ?? rootPath.split("/").pop() ?? "", Date.now())
 
-    const inserted = await this.db.prepare(
-      "SELECT id FROM codebases WHERE root_path = ?"
-    ).get(rootPath) as { id: number }
+    const inserted = await (await this.db.prepare("SELECT id FROM codebases WHERE root_path = ?")).get(rootPath) as { id: number }
     return inserted.id
   }
 
   /** List all codebases */
   async listCodebases(): Promise<Codebase[]> {
-    const rows = await this.db.prepare(
-      `SELECT c.id, c.root_path, c.name, c.indexed_at,
+    const rows = await (await this.db.prepare(`SELECT c.id, c.root_path, c.name, c.indexed_at,
               COUNT(DISTINCT f.file_path) as file_count,
               COALESCE(SUM(f.chunk_count), 0) as chunk_count
        FROM codebases c
        LEFT JOIN indexed_files f ON f.codebase_id = c.id
        GROUP BY c.id
-       ORDER BY c.root_path`
-    ).all() as CodebaseRow[]
+       ORDER BY c.root_path`)).all() as CodebaseRow[]
     return rows.map(r => ({
       id: r.id,
       rootPath: r.root_path,
@@ -111,18 +103,14 @@ export class Store {
 
   /** Update codebase indexed_at timestamp */
   async touchCodebase(codebaseId: number): Promise<void> {
-    await this.db.prepare(
-      "UPDATE codebases SET indexed_at = ? WHERE id = ?"
-    ).run(Date.now(), codebaseId)
+    await (await this.db.prepare("UPDATE codebases SET indexed_at = ? WHERE id = ?")).run(Date.now(), codebaseId)
   }
 
   // ── File hash management ─────────────────────────────────────────
 
   /** Get stored file hash, or null if not indexed */
   async getFileHash(codebaseId: number, filePath: string): Promise<string | null> {
-    const row = await this.db.prepare(
-      "SELECT file_hash FROM indexed_files WHERE codebase_id = ? AND file_path = ?"
-    ).get(codebaseId, filePath) as { file_hash: string } | undefined
+    const row = await (await this.db.prepare("SELECT file_hash FROM indexed_files WHERE codebase_id = ? AND file_path = ?")).get(codebaseId, filePath) as { file_hash: string } | undefined
     return row?.file_hash ?? null
   }
 
@@ -194,26 +182,20 @@ export class Store {
 
   /** Remove all chunks and file records for a codebase */
   async removeCodebaseChunks(codebaseId: number): Promise<void> {
-    await this.db.prepare("DELETE FROM chunks WHERE codebase_id = ?").run(codebaseId)
-    await this.db.prepare("DELETE FROM indexed_files WHERE codebase_id = ?").run(codebaseId)
+    await (await this.db.prepare("DELETE FROM chunks WHERE codebase_id = ?")).run(codebaseId)
+    await (await this.db.prepare("DELETE FROM indexed_files WHERE codebase_id = ?")).run(codebaseId)
   }
 
   /** Remove files that are no longer on disk (scoped to codebase) */
   async removeStaleFiles(codebaseId: number, activeFiles: Set<string>): Promise<number> {
-    const all = await this.db.prepare(
-      "SELECT file_path FROM indexed_files WHERE codebase_id = ?"
-    ).all(codebaseId) as { file_path: string }[]
+    const all = await (await this.db.prepare("SELECT file_path FROM indexed_files WHERE codebase_id = ?")).all(codebaseId) as { file_path: string }[]
     let removed = 0
     await this.db.exec("BEGIN")
     try {
       for (const row of all) {
         if (!activeFiles.has(row.file_path)) {
-          await this.db.prepare(
-            "DELETE FROM chunks WHERE codebase_id = ? AND file_path = ?"
-          ).run(codebaseId, row.file_path)
-          await this.db.prepare(
-            "DELETE FROM indexed_files WHERE codebase_id = ? AND file_path = ?"
-          ).run(codebaseId, row.file_path)
+          await (await this.db.prepare("DELETE FROM chunks WHERE codebase_id = ? AND file_path = ?")).run(codebaseId, row.file_path)
+          await (await this.db.prepare("DELETE FROM indexed_files WHERE codebase_id = ? AND file_path = ?")).run(codebaseId, row.file_path)
           removed++
         }
       }
@@ -234,9 +216,7 @@ export class Store {
     try {
       for (const item of items) {
         const json = JSON.stringify(item.embedding)
-        await this.db.prepare(
-          `UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`
-        ).run(json, item.modelName, item.chunkKey)
+        await (await this.db.prepare(`UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
       }
       await this.db.exec("COMMIT")
     } catch (e) {
@@ -246,9 +226,7 @@ export class Store {
   }
 
   async countStaleEmbeddings(codebaseId: number, modelName: string): Promise<number> {
-    const row = await this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM chunks WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`
-    ).get(codebaseId, modelName) as { cnt: number }
+    const row = await (await this.db.prepare(`SELECT COUNT(*) as cnt FROM chunks WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`)).get(codebaseId, modelName) as { cnt: number }
     return Number(row.cnt)
   }
 
@@ -262,8 +240,8 @@ export class Store {
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`
 
     const rows = limit
-      ? await this.db.prepare(sql).all(codebaseId, modelName, limit) as StaleEmbeddingRow[]
-      : await this.db.prepare(sql).all(codebaseId, modelName) as StaleEmbeddingRow[]
+      ? await (await this.db.prepare(sql)).all(codebaseId, modelName, limit) as StaleEmbeddingRow[]
+      : await (await this.db.prepare(sql)).all(codebaseId, modelName) as StaleEmbeddingRow[]
     return rows.map(r => ({
       chunkKey: r.chunk_key,
       name: r.name,
@@ -319,7 +297,7 @@ export class Store {
          ORDER BY distance ASC
          LIMIT ?`
 
-    const rows = await this.db.prepare(sql).all(json, limit) as VectorSearchRow[]
+    const rows = await (await this.db.prepare(sql)).all(json, limit) as VectorSearchRow[]
 
     return rows.map((row) => ({
       chunkKey: row.chunk_key,
@@ -337,9 +315,7 @@ export class Store {
   /** FTS search across all codebases (queries each FTS table, merges results) */
   async ftsSearch(query: string, limit: number, includeSnippet: boolean): Promise<SearchResult[]> {
     // Discover existing FTS tables in a single query instead of checking each codebase
-    const ftsTables = await this.db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*'"
-    ).all() as { name: string }[]
+    const ftsTables = await (await this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*'")).all() as { name: string }[]
 
     const allResults: SearchResult[] = []
 
@@ -347,16 +323,14 @@ export class Store {
       try {
         // Join FTS scores with chunk data in a single query (avoids per-row lookups)
         const snippetCol = includeSnippet ? "c.snippet," : ""
-        const rows = await this.db.prepare(
-          `SELECT c.chunk_key, c.file_path, c.name, c.kind, c.signature,
+        const rows = await (await this.db.prepare(`SELECT c.chunk_key, c.file_path, c.name, c.kind, c.signature,
                   ${snippetCol} c.start_line, c.end_line,
                   fts_score(f.name, f.signature, ?1) AS score
            FROM ${table} f
            JOIN chunks c ON c.id = f.chunk_id
            WHERE fts_match(f.name, f.signature, ?1)
            ORDER BY score DESC
-           LIMIT ?`
-        ).all(query, limit) as (ChunkDataRow & { score: number })[]
+           LIMIT ?`)).all(query, limit) as (ChunkDataRow & { score: number; snippet?: string })[]
 
         for (const row of rows) {
           allResults.push({
@@ -365,7 +339,7 @@ export class Store {
             name: row.name,
             kind: row.kind,
             signature: row.signature,
-            snippet: includeSnippet ? row.snippet : "",
+            snippet: includeSnippet ? (row.snippet ?? "") : "",
             startLine: row.start_line,
             endLine: row.end_line,
             score: row.score,
@@ -387,9 +361,7 @@ export class Store {
 
   /** Count chunks that have embeddings (i.e., are searchable) */
   async countEmbeddedChunks(): Promise<number> {
-    const row = await this.db.prepare(
-      "SELECT COUNT(*) as cnt FROM chunks WHERE embedding IS NOT NULL"
-    ).get() as { cnt: number }
+    const row = await (await this.db.prepare("SELECT COUNT(*) as cnt FROM chunks WHERE embedding IS NOT NULL")).get() as { cnt: number }
     return row.cnt
   }
 
@@ -400,8 +372,8 @@ export class Store {
       : "SELECT file_path, file_hash, chunk_count, indexed_at FROM indexed_files ORDER BY file_path"
 
     const rows = codebaseId != null
-      ? await this.db.prepare(sql).all(codebaseId) as IndexedFileRow[]
-      : await this.db.prepare(sql).all() as IndexedFileRow[]
+      ? await (await this.db.prepare(sql)).all(codebaseId) as IndexedFileRow[]
+      : await (await this.db.prepare(sql)).all() as IndexedFileRow[]
 
     return rows.map((row) => ({
       filePath: row.file_path,
