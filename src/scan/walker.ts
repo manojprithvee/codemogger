@@ -58,8 +58,12 @@ export async function scanDirectory(
   try {
     const gitignore = await readFile(join(rootDir, ".gitignore"), "utf-8");
     ignorePatterns = loadIgnorePatterns(gitignore);
-  } catch {
-    // no .gitignore
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      errors.push(`cannot read .gitignore: ${err}`);
+    }
+    // ENOENT = no .gitignore, which is fine
   }
 
   const langFilter = languages ? new Set(languages) : null;
@@ -83,12 +87,12 @@ export async function scanDirectory(
 
       const fullPath = join(dir, name);
 
-      if (entry.isDirectory()) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
         await walk(fullPath);
         continue;
       }
 
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) continue;
 
       // Check if this is a supported language
       const langConfig = detectLanguage(name);

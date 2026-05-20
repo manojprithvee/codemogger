@@ -3,6 +3,9 @@ import type { Node as SyntaxNode } from "web-tree-sitter"
 import type { CodeChunk } from "./types.ts"
 import type { LanguageConfig } from "./languages.ts"
 
+// Chunks longer than this are split at nested top-level nodes rather than kept as one unit.
+// 150 lines is roughly the context window a model can attend to without losing detail;
+// going much larger hurts retrieval precision.
 const MAX_CHUNK_LINES = 150
 
 let parserReady: Promise<void> | null = null

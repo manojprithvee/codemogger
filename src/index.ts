@@ -95,6 +95,7 @@ export class CodeIndex {
 
     // Get or create codebase entry
     const codebaseId = await store.getOrCreateCodebase(rootDir);
+    await store.ensureFtsTable(codebaseId);
 
     const progressRaw = opts?.onProgress;
     let lastPct = -1;
@@ -205,9 +206,10 @@ export class CodeIndex {
         progress({ phase: "chunk", current: batchStart + bi + 1, total: filesToProcess.length });
       }
 
-      // Write chunks to DB
+      // Write chunks to DB, then incrementally populate FTS entries
       if (batchChunks.length > 0) {
         await store.batchUpsertAllFileChunks(codebaseId, batchChunks);
+        await store.populateFtsForFiles(codebaseId, batchChunks.map(f => f.filePath));
       }
     }
 
@@ -224,15 +226,21 @@ export class CodeIndex {
       for (let i = 0; i < stale.length; i += EMBED_BATCH) {
         const slice = stale.slice(i, i + EMBED_BATCH);
         const texts = slice.map(buildEmbedText);
-        const vectors = await this.embedder(texts);
-        await store.batchUpsertEmbeddings(
-          slice.map((s, j) => ({
-            chunkKey: s.chunkKey,
-            embedding: vectors[j]!,
-            modelName: this.embeddingModel,
-          })),
-        );
-        embedded += vectors.length;
+        try {
+          const vectors = await this.embedder(texts);
+          await store.batchUpsertEmbeddings(
+            slice.map((s, j) => ({
+              chunkKey: s.chunkKey,
+              embedding: vectors[j]!,
+              modelName: this.embeddingModel,
+            })),
+          );
+          embedded += vectors.length;
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`embed batch ${Math.floor(i / EMBED_BATCH) + 1}: ${msg}`);
+          process.stderr.write(`[codemogger] warning: embed batch failed: ${msg}\n`);
+        }
         progress({ phase: "embed", current: embedded, total: embedTotal });
       }
 
@@ -245,10 +253,10 @@ export class CodeIndex {
     progress({ phase: "cleanup", current: 0, total: 0 });
     const removed = await store.removeStaleFiles(codebaseId, activeFiles);
 
-    // Phase 5: Build per-codebase FTS table
+    // Phase 5: Optimize FTS index (entries populated incrementally above)
     progress({ phase: "fts", current: 0, total: 0 });
     const t3 = performance.now();
-    await store.rebuildFtsTable(codebaseId);
+    await store.optimizeFts(codebaseId);
     const ftsTime = Math.round(performance.now() - t3);
 
     // Update codebase timestamp

@@ -198,6 +198,10 @@ The real advantage isn't speed - it's **finding the right code when you don't kn
 
 ripgrep matches thousands of files on common keywords. codemogger returns the 5 most relevant definitions.
 
+## Dependencies note
+
+`@tursodatabase/database` is currently pinned to a pre-release version (`0.5.0-pre.14`). There is no stable `0.5.x` release yet; once one is published this should be updated. The pre-release is stable enough for development use but may have breaking changes before it reaches a final release.
+
 ## Architecture
 
 - **Bun/TypeScript** runtime

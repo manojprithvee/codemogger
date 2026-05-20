@@ -25,7 +25,9 @@ export const localEmbed: Embedder = async (texts: string[]): Promise<number[][]>
   const pipe = await getPipeline()
   const results: number[][] = []
 
-  // Process in batches to balance throughput and memory
+  // Process in batches to balance throughput and memory.
+  // 128 is a common sweet-spot for all-MiniLM-L6-v2 on CPU: large enough to
+  // amortize tokenization overhead, small enough to avoid OOM on typical hardware.
   const BATCH = 128
   for (let i = 0; i < texts.length; i += BATCH) {
     const batch = texts.slice(i, i + BATCH)

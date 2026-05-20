@@ -4,10 +4,16 @@ import {
   ftsTableName,
   createFtsTableSQL,
   createFtsIndexSQL,
-  dropFtsTableSQL,
-  populateFtsSQL,
+  populateFtsForFileSQL,
 } from "./schema.ts"
 import type { CodeChunk } from "../chunk/types.ts"
+
+// Private row types for database query results — keeps column renames type-safe.
+type CodebaseRow = { id: number; root_path: string; name: string; indexed_at: number; file_count: number; chunk_count: number }
+type StaleEmbeddingRow = { chunk_key: string; name: string; signature: string; file_path: string; kind: string; snippet: string }
+type VectorSearchRow = { chunk_key: string; file_path: string; name: string; kind: string; signature: string; snippet: string; start_line: number; end_line: number; distance: number }
+type ChunkDataRow = { chunk_key: string; file_path: string; name: string; kind: string; signature: string; start_line: number; end_line: number }
+type IndexedFileRow = { file_path: string; file_hash: string; chunk_count: number; indexed_at: number }
 
 export interface SearchResult {
   chunkKey: string
@@ -92,7 +98,7 @@ export class Store {
        LEFT JOIN indexed_files f ON f.codebase_id = c.id
        GROUP BY c.id
        ORDER BY c.root_path`
-    ).all() as any[]
+    ).all() as CodebaseRow[]
     return rows.map(r => ({
       id: r.id,
       rootPath: r.root_path,
@@ -248,14 +254,16 @@ export class Store {
 
   /** Get chunks that need (re-)embedding (scoped to codebase) */
   async getStaleEmbeddings(codebaseId: number, modelName: string, limit?: number): Promise<{ chunkKey: string; name: string; signature: string; filePath: string; kind: string; snippet: string }[]> {
-    const sql = limit 
+    const sql = limit
       ? `SELECT chunk_key, name, signature, file_path, kind, snippet FROM chunks
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)
-         LIMIT ${limit}`
+         LIMIT ?`
       : `SELECT chunk_key, name, signature, file_path, kind, snippet FROM chunks
          WHERE codebase_id = ? AND (embedding IS NULL OR embedding_model != ?)`
-    
-    const rows = await this.db.prepare(sql).all(codebaseId, modelName) as any[]
+
+    const rows = limit
+      ? await this.db.prepare(sql).all(codebaseId, modelName, limit) as StaleEmbeddingRow[]
+      : await this.db.prepare(sql).all(codebaseId, modelName) as StaleEmbeddingRow[]
     return rows.map(r => ({
       chunkKey: r.chunk_key,
       name: r.name,
@@ -268,17 +276,27 @@ export class Store {
 
   // ── Per-codebase FTS lifecycle ───────────────────────────────────
 
-  /** Drop and rebuild FTS table for a codebase */
-  async rebuildFtsTable(codebaseId: number): Promise<void> {
-    // Drop old table (and its index)
-    await this.db.exec(dropFtsTableSQL(codebaseId))
-    // Create fresh table
+  /** Drop FTS table for a codebase if it doesn't exist yet (idempotent) */
+  async ensureFtsTable(codebaseId: number): Promise<void> {
     await this.db.exec(createFtsTableSQL(codebaseId))
-    // Populate from chunks
-    await this.db.prepare(populateFtsSQL(codebaseId)).run(codebaseId)
-    // Build FTS index
-    await this.db.exec(createFtsIndexSQL(codebaseId))
-    // Optimize FTS index for faster queries
+    try {
+      await this.db.exec(createFtsIndexSQL(codebaseId))
+    } catch {
+      // Index already exists — ignore
+    }
+  }
+
+  /** Insert FTS entries for all chunks belonging to the given file paths */
+  async populateFtsForFiles(codebaseId: number, filePaths: string[]): Promise<void> {
+    if (filePaths.length === 0) return
+    const stmt = await this.db.prepare(populateFtsForFileSQL(codebaseId))
+    for (const fp of filePaths) {
+      await stmt.run(codebaseId, fp)
+    }
+  }
+
+  /** Optimize the FTS index (call once after a batch of changes) */
+  async optimizeFts(codebaseId: number): Promise<void> {
     await this.db.exec(`OPTIMIZE INDEX idx_${ftsTableName(codebaseId)}`)
   }
 
@@ -301,7 +319,7 @@ export class Store {
          ORDER BY distance ASC
          LIMIT ?`
 
-    const rows = await this.db.prepare(sql).all(json, limit) as any[]
+    const rows = await this.db.prepare(sql).all(json, limit) as VectorSearchRow[]
 
     return rows.map((row) => ({
       chunkKey: row.chunk_key,
@@ -318,38 +336,29 @@ export class Store {
 
   /** FTS search across all codebases (queries each FTS table, merges results) */
   async ftsSearch(query: string, limit: number, includeSnippet: boolean): Promise<SearchResult[]> {
-    // Find all codebase IDs that have FTS tables
-    const codebases = await this.db.prepare("SELECT id FROM codebases").all() as { id: number }[]
+    // Discover existing FTS tables in a single query instead of checking each codebase
+    const ftsTables = await this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*'"
+    ).all() as { name: string }[]
 
     const allResults: SearchResult[] = []
 
-    for (const { id } of codebases) {
-      const table = ftsTableName(id)
-      // Check if FTS table exists
-      const exists = await this.db.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-      ).get(table) as { name: string } | undefined
-      if (!exists) continue
-
+    for (const { name: table } of ftsTables) {
       try {
-        const scores = await this.db.prepare(
-          `SELECT chunk_id, fts_score(name, signature, ?1) AS score
-           FROM ${table}
-           WHERE fts_match(name, signature, ?1)
+        // Join FTS scores with chunk data in a single query (avoids per-row lookups)
+        const snippetCol = includeSnippet ? "c.snippet," : ""
+        const rows = await this.db.prepare(
+          `SELECT c.chunk_key, c.file_path, c.name, c.kind, c.signature,
+                  ${snippetCol} c.start_line, c.end_line,
+                  fts_score(f.name, f.signature, ?1) AS score
+           FROM ${table} f
+           JOIN chunks c ON c.id = f.chunk_id
+           WHERE fts_match(f.name, f.signature, ?1)
            ORDER BY score DESC
            LIMIT ?`
-        ).all(query, limit) as { chunk_id: number; score: number }[]
+        ).all(query, limit) as (ChunkDataRow & { score: number })[]
 
-        if (scores.length === 0) continue
-
-        for (const { chunk_id, score } of scores) {
-          const dataSql = includeSnippet
-            ? `SELECT chunk_key, file_path, name, kind, signature, snippet, start_line, end_line FROM chunks WHERE id = ?`
-            : `SELECT chunk_key, file_path, name, kind, signature, start_line, end_line FROM chunks WHERE id = ?`
-
-          const row = await this.db.prepare(dataSql).get(chunk_id) as any
-          if (!row) continue
-
+        for (const row of rows) {
           allResults.push({
             chunkKey: row.chunk_key,
             filePath: row.file_path,
@@ -359,19 +368,19 @@ export class Store {
             snippet: includeSnippet ? row.snippet : "",
             startLine: row.start_line,
             endLine: row.end_line,
-            score,
+            score: row.score,
           })
         }
-      } catch (e: any) {
-        // Only ignore "no such table" / "no such index" errors (FTS not built yet)
-        const msg = String(e?.message ?? e)
+      } catch (e: unknown) {
+        // Ignore stale FTS tables (no such table / no such index); rethrow others
+        const msg = String((e as Error)?.message ?? e)
         if (!msg.includes("no such table") && !msg.includes("no such index")) {
           throw e
         }
       }
     }
 
-    // Sort by score descending, take top limit
+    // Merge across codebases: sort by score descending, take top limit
     allResults.sort((a, b) => b.score - a.score)
     return allResults.slice(0, limit)
   }
@@ -391,8 +400,8 @@ export class Store {
       : "SELECT file_path, file_hash, chunk_count, indexed_at FROM indexed_files ORDER BY file_path"
 
     const rows = codebaseId != null
-      ? await this.db.prepare(sql).all(codebaseId) as any[]
-      : await this.db.prepare(sql).all() as any[]
+      ? await this.db.prepare(sql).all(codebaseId) as IndexedFileRow[]
+      : await this.db.prepare(sql).all() as IndexedFileRow[]
 
     return rows.map((row) => ({
       filePath: row.file_path,
