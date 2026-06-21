@@ -83,3 +83,6 @@ ripgrep/
 continue/
 opencode/
 skills/
+
+# codemogger index db
+.codemogger/
