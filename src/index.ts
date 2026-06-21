@@ -128,12 +128,14 @@ export class CodeIndex {
     // Phase 2: Check hashes, chunk changed files, embed — pipelined in batches
     const t1 = performance.now();
 
-    // Batch hash lookups: check which files changed (using absolute paths)
+    // Batch hash lookups: load all stored hashes once, then check which files
+    // changed (using absolute paths) — avoids one SELECT round-trip per file.
+    const storedHashes = await store.getAllFileHashes(codebaseId);
     const filesToProcess: typeof files = [];
     for (let fi = 0; fi < files.length; fi++) {
       const file = files[fi]!;
       activeFiles.add(file.absPath);
-      const storedHash = await store.getFileHash(codebaseId, file.absPath);
+      const storedHash = storedHashes.get(file.absPath) ?? null;
       if (storedHash === file.hash) {
         skipped++;
       } else {

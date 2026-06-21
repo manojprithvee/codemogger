@@ -114,6 +114,14 @@ export class Store {
     return row?.file_hash ?? null
   }
 
+  /** Load all stored file hashes for a codebase in one query (path → hash) */
+  async getAllFileHashes(codebaseId: number): Promise<Map<string, string>> {
+    const rows = await (await this.db.prepare("SELECT file_path, file_hash FROM indexed_files WHERE codebase_id = ?")).all(codebaseId) as { file_path: string; file_hash: string }[]
+    const map = new Map<string, string>()
+    for (const row of rows) map.set(row.file_path, row.file_hash)
+    return map
+  }
+
   // ── Chunk writes ─────────────────────────────────────────────────
 
   /** Batch insert chunks for multiple files in one transaction */
@@ -214,9 +222,10 @@ export class Store {
     if (items.length === 0) return
     await this.db.exec("BEGIN")
     try {
+      const stmt = await this.db.prepare(`UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`)
       for (const item of items) {
         const json = JSON.stringify(item.embedding)
-        await (await this.db.prepare(`UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
+        await stmt.run(json, item.modelName, item.chunkKey)
       }
       await this.db.exec("COMMIT")
     } catch (e) {
