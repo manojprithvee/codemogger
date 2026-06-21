@@ -53,3 +53,51 @@ bun install
 bun bin/codemogger.ts index .
 # then dispatch the paired sub-agents per SPEC.md
 ```
+
+---
+
+# Round 2 results — harder tasks
+
+Same A/B setup, but conceptual / cross-file / adversarial-keyword questions.
+Tool-call counts below are the authoritative `tool_uses` from agent telemetry
+(agents' self-counts were occasionally off).
+
+| Task | Arm | Correct? | Tool calls | Tokens | Wall-clock |
+|------|-----|:---:|:---:|---:|---:|
+| H1 RRF fusion (k=60) | A codemogger | ✅ | 3 | 15,891 | 15.9 s |
+| H1 | B baseline | ✅ | 3 | 14,229 | 24.4 s |
+| H2 incremental skip (cross-file) | A codemogger | ✅ | 6 | 19,294 | 37.7 s |
+| H2 | B baseline | ✅ | 5 | 15,248 | 20.2 s |
+| H3 name>signature weight (adversarial) | A codemogger | ✅ | 6 | 18,785 | 39.5 s |
+| H3 | B baseline | ✅ | 13 | 23,460 | 57.3 s |
+| H4 per-codebase FTS isolation | A codemogger | ✅ | 3 | 16,824 | 19.7 s |
+| H4 | B baseline | ✅ | 4 | 17,004 | 19.0 s |
+
+## Aggregate (Round 2)
+
+| Metric | Arm A (codemogger) | Arm B (baseline) |
+|--------|:---:|:---:|
+| Accuracy | 4/4 | 4/4 |
+| Total tool calls | **18** | 25 |
+| Total tokens | 70,794 | **69,941** |
+| Total wall-clock | **112.8 s** | 120.9 s |
+
+## What the hard tasks revealed
+
+- **Adversarial keywords are where codemogger pulls ahead (H3).** The word
+  "weight" appears in BOTH `rrfMerge` (fusion weights) and the FTS DDL
+  (`name=5.0,signature=3.0`). The grep arm thrashed — **13 tool calls, 23.5k
+  tokens, 57 s** chasing the wrong "weight" first. The codemogger arm's
+  semantic query landed on the FTS index in 6 calls. This is the headline win.
+- **Clean keyword-y cross-file questions can favor grep (H2).** "skip /
+  unchanged / hash" are literal tokens, so `rg` jumped straight to
+  `index.ts`; the codemogger arm found the right region but over-verified
+  (6 vs 5 calls). Semantic search doesn't help when the keyword is obvious.
+- **Both arms stayed 100% accurate** even on conceptual questions (RRF,
+  per-codebase isolation). H4 even surfaced two equally-valid answers:
+  `schema.ts::ftsTableName` (where the tables are defined) and
+  `store.ts::ftsSearch` (where isolation is enforced at query time).
+- **Net:** tool calls 18 vs 25 (~28% fewer with codemogger); tokens and
+  wall-clock roughly tied on this tiny repo. The advantage concentrates in
+  ambiguous/adversarial lookups and would widen on a large codebase where
+  grep returns thousands of matches.
