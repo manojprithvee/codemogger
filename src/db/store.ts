@@ -1,4 +1,4 @@
-import { connect } from "@tursodatabase/database"
+import { connect } from "./libsql-adapter.ts"
 import {
   ALL_SCHEMA,
   ftsTableName,
@@ -43,6 +43,17 @@ export interface Codebase {
   chunkCount: number
 }
 
+/**
+ * Build a safe FTS5 MATCH expression from a free-text query. Tokens are
+ * extracted (alphanumerics + underscore), wrapped in double quotes to defuse
+ * FTS5 operator characters, and OR-combined for recall.
+ */
+function toFtsMatchExpr(query: string): string {
+  const tokens = query.match(/[A-Za-z0-9_]+/g)
+  if (!tokens || tokens.length === 0) return ""
+  return tokens.map((t) => `"${t}"`).join(" OR ")
+}
+
 export class Store {
   private db: Awaited<ReturnType<typeof connect>>
   private initialized = false
@@ -52,9 +63,7 @@ export class Store {
   }
 
   static async open(dbPath: string): Promise<Store> {
-    const db = await connect(dbPath, {
-      experimental: ["index_method", "multiprocess_wal"],
-    })
+    const db = await connect(dbPath)
     const store = new Store(db)
     await store.init()
     return store
@@ -216,7 +225,7 @@ export class Store {
     try {
       for (const item of items) {
         const json = JSON.stringify(item.embedding)
-        await (await this.db.prepare(`UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
+        await (await this.db.prepare(`UPDATE chunks SET embedding = vector32(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
       }
       await this.db.exec("COMMIT")
     } catch (e) {
@@ -257,10 +266,13 @@ export class Store {
   /** Drop FTS table for a codebase if it doesn't exist yet (idempotent) */
   async ensureFtsTable(codebaseId: number): Promise<void> {
     await this.db.exec(createFtsTableSQL(codebaseId))
-    try {
-      await this.db.exec(createFtsIndexSQL(codebaseId))
-    } catch {
-      // Index already exists — ignore
+    const indexSql = createFtsIndexSQL(codebaseId)
+    if (indexSql.trim()) {
+      try {
+        await this.db.exec(indexSql)
+      } catch {
+        // Index already exists — ignore
+      }
     }
   }
 
@@ -275,7 +287,9 @@ export class Store {
 
   /** Optimize the FTS index (call once after a batch of changes) */
   async optimizeFts(codebaseId: number): Promise<void> {
-    await this.db.exec(`OPTIMIZE INDEX idx_${ftsTableName(codebaseId)}`)
+    // FTS5 optimize is invoked via a special INSERT command.
+    const table = ftsTableName(codebaseId)
+    await this.db.exec(`INSERT INTO ${table}(${table}) VALUES('optimize')`)
   }
 
   // ── Search ───────────────────────────────────────────────────────
@@ -285,13 +299,13 @@ export class Store {
     const json = JSON.stringify(queryEmbedding)
     const sql = includeSnippet
       ? `SELECT chunk_key, file_path, name, kind, signature, snippet, start_line, end_line,
-                vector_distance_cos(embedding, vector8(?)) AS distance
+                vector_distance_cos(embedding, vector32(?)) AS distance
          FROM chunks
          WHERE embedding IS NOT NULL
          ORDER BY distance ASC
          LIMIT ?`
       : `SELECT chunk_key, file_path, name, kind, signature, start_line, end_line,
-                vector_distance_cos(embedding, vector8(?)) AS distance
+                vector_distance_cos(embedding, vector32(?)) AS distance
          FROM chunks
          WHERE embedding IS NOT NULL
          ORDER BY distance ASC
@@ -314,23 +328,32 @@ export class Store {
 
   /** FTS search across all codebases (queries each FTS table, merges results) */
   async ftsSearch(query: string, limit: number, includeSnippet: boolean): Promise<SearchResult[]> {
-    // Discover existing FTS tables in a single query instead of checking each codebase
-    const ftsTables = await (await this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*'")).all() as { name: string }[]
+    // Discover existing FTS5 virtual tables. Filter on the CREATE statement so
+    // we skip FTS5's internal shadow tables (fts_N_data, fts_N_idx, …), whose
+    // sql column is NULL.
+    const ftsTables = await (await this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'fts_*' AND sql LIKE '%fts5%'"
+    )).all() as { name: string }[]
+
+    const matchExpr = toFtsMatchExpr(query)
+    if (!matchExpr) return []
 
     const allResults: SearchResult[] = []
 
     for (const { name: table } of ftsTables) {
       try {
-        // Join FTS scores with chunk data in a single query (avoids per-row lookups)
+        // Join FTS scores with chunk data in a single query (avoids per-row
+        // lookups). bm25() returns lower (more negative) for better matches and
+        // weights name (5.0) above signature (3.0); negate so higher = better.
         const snippetCol = includeSnippet ? "c.snippet," : ""
         const rows = await (await this.db.prepare(`SELECT c.chunk_key, c.file_path, c.name, c.kind, c.signature,
                   ${snippetCol} c.start_line, c.end_line,
-                  fts_score(f.name, f.signature, ?1) AS score
+                  -bm25(${table}, 5.0, 3.0) AS score
            FROM ${table} f
            JOIN chunks c ON c.id = f.chunk_id
-           WHERE fts_match(f.name, f.signature, ?1)
+           WHERE ${table} MATCH ?
            ORDER BY score DESC
-           LIMIT ?`)).all(query, limit) as (ChunkDataRow & { score: number; snippet?: string })[]
+           LIMIT ?`)).all(matchExpr, limit) as (ChunkDataRow & { score: number; snippet?: string })[]
 
         for (const row of rows) {
           allResults.push({
