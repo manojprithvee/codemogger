@@ -11,6 +11,7 @@ import { chunkFile } from "./chunk/treesitter.ts";
 import { detectLanguage } from "./chunk/languages.ts";
 import { preprocessQuery, type QueryMode } from "./search/query.ts";
 import { rrfMerge } from "./search/rank.ts";
+import { AnnIndex, type AnnBuildOptions } from "./search/ann.ts";
 import type { Embedder } from "./embed/types.ts";
 
 export type { SearchResult, IndexedFile, Codebase } from "./db/store.ts";
@@ -73,6 +74,7 @@ export class CodeIndex {
   private embedder: Embedder;
   private embeddingModel: string;
   private searchVerified = false;
+  private annIndex: AnnIndex | null = null;
 
   constructor(opts: CodeIndexOptions) {
     this.dbPath = opts.dbPath;
@@ -300,7 +302,9 @@ export class CodeIndex {
 
     if (mode === "semantic") {
       const [queryVec] = (await this.embedder([query])) as [number[]];
-      const results = await store.vectorSearch(queryVec, limit, includeSnippet);
+      const results = this.annIndex
+        ? await this.annSearch(store, queryVec, limit, includeSnippet)
+        : await store.vectorSearch(queryVec, limit, includeSnippet);
       return threshold > 0
         ? results.filter((r) => r.score >= threshold)
         : results;
@@ -320,13 +324,50 @@ export class CodeIndex {
 
     // Hybrid: combine keyword + semantic via RRF
     const [queryVec] = (await this.embedder([query])) as [number[]];
-    const vecResults = await store.vectorSearch(
-      queryVec,
-      limit,
-      includeSnippet,
-    );
+    const vecResults = this.annIndex
+      ? await this.annSearch(store, queryVec, limit, includeSnippet)
+      : await store.vectorSearch(queryVec, limit, includeSnippet);
     const merged = rrfMerge(ftsResults, vecResults, limit);
     return threshold > 0 ? merged.filter((r) => r.score >= threshold) : merged;
+  }
+
+  /**
+   * Build an in-memory ANN (HNSW) index from the embeddings stored in SQLite.
+   * Once built, semantic and hybrid search use sub-linear ANN lookup instead of
+   * the brute-force cosine scan. Returns build stats. Call again to rebuild
+   * after re-indexing. SQLite remains the source of truth.
+   */
+  async buildAnnIndex(opts?: AnnBuildOptions): Promise<{ size: number; buildMs: number }> {
+    const store = await this.getStore();
+    const items = await store.getAllEmbeddings();
+    const t = performance.now();
+    this.annIndex = await AnnIndex.build(items, opts);
+    return { size: items.length, buildMs: Math.round(performance.now() - t) };
+  }
+
+  /** Drop the ANN index; subsequent semantic search falls back to the brute-force scan. */
+  clearAnnIndex(): void {
+    this.annIndex = null;
+  }
+
+  /** Resolve ANN hits to full search results by hydrating chunk metadata from SQLite. */
+  private async annSearch(
+    store: Store,
+    queryVec: number[],
+    limit: number,
+    includeSnippet: boolean,
+  ): Promise<SearchResult[]> {
+    const hits = this.annIndex!.search(queryVec, limit);
+    const meta = await store.getChunkMetaByKeys(
+      hits.map((h) => h.chunkKey),
+      includeSnippet,
+    );
+    const results: SearchResult[] = [];
+    for (const hit of hits) {
+      const m = meta.get(hit.chunkKey);
+      if (m) results.push({ ...m, score: hit.score });
+    }
+    return results;
   }
 
   /**

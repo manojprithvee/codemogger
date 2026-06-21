@@ -289,6 +289,39 @@ export class Store {
 
   // ── Search ───────────────────────────────────────────────────────
 
+  /** Load all chunk embeddings (decoded to float arrays) for building an ANN index */
+  async getAllEmbeddings(): Promise<{ chunkKey: string; embedding: number[] }[]> {
+    const rows = await (await this.db.prepare(
+      "SELECT chunk_key, vector_extract(embedding) AS emb FROM chunks WHERE embedding IS NOT NULL"
+    )).all() as { chunk_key: string; emb: string }[]
+    return rows.map((r) => ({ chunkKey: r.chunk_key, embedding: JSON.parse(r.emb) as number[] }))
+  }
+
+  /** Fetch chunk metadata for a set of chunk keys (used to hydrate ANN hits) */
+  async getChunkMetaByKeys(chunkKeys: string[], includeSnippet: boolean): Promise<Map<string, Omit<SearchResult, "score">>> {
+    const map = new Map<string, Omit<SearchResult, "score">>()
+    if (chunkKeys.length === 0) return map
+    const snippetCol = includeSnippet ? "snippet," : ""
+    const stmt = await this.db.prepare(
+      `SELECT chunk_key, file_path, name, kind, signature, ${snippetCol} start_line, end_line FROM chunks WHERE chunk_key = ?`
+    )
+    for (const key of chunkKeys) {
+      const row = await stmt.get(key) as (ChunkDataRow & { snippet?: string }) | undefined
+      if (!row) continue
+      map.set(key, {
+        chunkKey: row.chunk_key,
+        filePath: row.file_path,
+        name: row.name,
+        kind: row.kind,
+        signature: row.signature,
+        snippet: includeSnippet ? (row.snippet ?? "") : "",
+        startLine: row.start_line,
+        endLine: row.end_line,
+      })
+    }
+    return map
+  }
+
   /** Vector search across all codebases (global) */
   async vectorSearch(queryEmbedding: number[], limit: number, includeSnippet: boolean): Promise<SearchResult[]> {
     const json = JSON.stringify(queryEmbedding)
