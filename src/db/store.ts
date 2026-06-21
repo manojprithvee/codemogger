@@ -225,7 +225,7 @@ export class Store {
     try {
       for (const item of items) {
         const json = JSON.stringify(item.embedding)
-        await (await this.db.prepare(`UPDATE chunks SET embedding = vector32(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
+        await (await this.db.prepare(`UPDATE chunks SET embedding = vector8(?), embedding_model = ? WHERE chunk_key = ?`)).run(json, item.modelName, item.chunkKey)
       }
       await this.db.exec("COMMIT")
     } catch (e) {
@@ -299,13 +299,13 @@ export class Store {
     const json = JSON.stringify(queryEmbedding)
     const sql = includeSnippet
       ? `SELECT chunk_key, file_path, name, kind, signature, snippet, start_line, end_line,
-                vector_distance_cos(embedding, vector32(?)) AS distance
+                vector_distance_cos(embedding, vector8(?)) AS distance
          FROM chunks
          WHERE embedding IS NOT NULL
          ORDER BY distance ASC
          LIMIT ?`
       : `SELECT chunk_key, file_path, name, kind, signature, start_line, end_line,
-                vector_distance_cos(embedding, vector32(?)) AS distance
+                vector_distance_cos(embedding, vector8(?)) AS distance
          FROM chunks
          WHERE embedding IS NOT NULL
          ORDER BY distance ASC
