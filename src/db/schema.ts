@@ -48,25 +48,21 @@ export function ftsTableName(codebaseId: number): string {
 
 export function createFtsTableSQL(codebaseId: number): string {
   const table = ftsTableName(codebaseId)
+  // libSQL/SQLite FTS5 virtual table. Field weighting (name > signature) is
+  // applied at query time via bm25(table, 5.0, 3.0) rather than in the DDL.
   return `
-CREATE TABLE IF NOT EXISTS ${table} (
-    chunk_id    INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL DEFAULT '',
-    signature   TEXT NOT NULL DEFAULT ''
+CREATE VIRTUAL TABLE IF NOT EXISTS ${table} USING fts5(
+    name,
+    signature,
+    chunk_id UNINDEXED
 )
 `
 }
 
-export function createFtsIndexSQL(codebaseId: number): string {
-  const table = ftsTableName(codebaseId)
-  return `
-CREATE INDEX IF NOT EXISTS idx_${table} ON ${table}
-    USING fts (name, signature)
-    WITH (
-        tokenizer = 'default',
-        weights = 'name=5.0,signature=3.0'
-    )
-`
+export function createFtsIndexSQL(_codebaseId: number): string {
+  // FTS5 needs no separate index — the virtual table is the index. No-op for
+  // libSQL; kept for API compatibility with the previous Turso backend.
+  return ""
 }
 
 export function dropFtsTableSQL(codebaseId: number): string {
@@ -76,8 +72,8 @@ export function dropFtsTableSQL(codebaseId: number): string {
 export function populateFtsSQL(codebaseId: number): string {
   const table = ftsTableName(codebaseId)
   return `
-INSERT INTO ${table} (chunk_id, name, signature)
-SELECT id, name, signature FROM chunks WHERE codebase_id = ?
+INSERT INTO ${table} (name, signature, chunk_id)
+SELECT name, signature, id FROM chunks WHERE codebase_id = ?
 `
 }
 
@@ -85,8 +81,8 @@ SELECT id, name, signature FROM chunks WHERE codebase_id = ?
 export function populateFtsForFileSQL(codebaseId: number): string {
   const table = ftsTableName(codebaseId)
   return `
-INSERT INTO ${table} (chunk_id, name, signature)
-SELECT id, name, signature FROM chunks WHERE codebase_id = ? AND file_path = ?
+INSERT INTO ${table} (name, signature, chunk_id)
+SELECT name, signature, id FROM chunks WHERE codebase_id = ? AND file_path = ?
 `
 }
 
