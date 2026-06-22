@@ -54,9 +54,11 @@ export interface IndexResult {
 
 export interface CodeIndexOptions {
   dbPath: string;
-  /** Embedding function - SDK users must provide their own */
+  /** Embedding function for indexing documents */
   embedder: Embedder;
-  /** Model name stored alongside embeddings (e.g. "all-MiniLM-L6-v2") */
+  /** Separate embedder for query-time (e.g. nomic search_query: prefix). Falls back to embedder if omitted. */
+  queryEmbedder?: Embedder;
+  /** Model name stored alongside embeddings (e.g. "nomic-embed-text-v1.5") */
   embeddingModel: string;
 }
 
@@ -71,12 +73,14 @@ export class CodeIndex {
   private store: Store | null = null;
   private dbPath: string;
   private embedder: Embedder;
+  private queryEmbedder: Embedder;
   private embeddingModel: string;
   private searchVerified = false;
 
   constructor(opts: CodeIndexOptions) {
     this.dbPath = opts.dbPath;
     this.embedder = opts.embedder;
+    this.queryEmbedder = opts.queryEmbedder ?? opts.embedder;
     this.embeddingModel = opts.embeddingModel;
   }
 
@@ -155,7 +159,9 @@ export class CodeIndex {
       else if (s.name) text += `: ${s.name}`;
       if (s.signature) text += `\n${s.signature}`;
       if (s.snippet) {
-        const preview = s.snippet.slice(0, 500);
+        // nomic-embed-text-v1.5 supports 8192 tokens; use up to ~6000 chars
+        // (~1700 tokens) for the snippet so large functions aren't truncated.
+        const preview = s.snippet.slice(0, 6000);
         text += `\n${preview}`;
       }
       return text;
@@ -297,7 +303,7 @@ export class CodeIndex {
     await this.verifySearchable(store);
 
     if (mode === "semantic") {
-      const [queryVec] = (await this.embedder([query])) as [number[]];
+      const [queryVec] = (await this.queryEmbedder([query])) as [number[]];
       const results = await store.vectorSearch(queryVec, limit, includeSnippet);
       return threshold > 0
         ? results.filter((r) => r.score >= threshold)
@@ -317,7 +323,7 @@ export class CodeIndex {
     }
 
     // Hybrid: combine keyword + semantic via RRF
-    const [queryVec] = (await this.embedder([query])) as [number[]];
+    const [queryVec] = (await this.queryEmbedder([query])) as [number[]];
     const vecResults = await store.vectorSearch(
       queryVec,
       limit,
